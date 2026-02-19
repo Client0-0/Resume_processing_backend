@@ -1,0 +1,6 @@
+@Shortlister.API_HostAddress = http://localhost:5028
+
+GET {{Shortlister.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
