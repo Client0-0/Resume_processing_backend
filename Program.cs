@@ -24,9 +24,11 @@ builder.Services.AddSingleton(x => new BlobServiceClient(connectionString));
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp",
-        policy => policy.WithOrigins("http://localhost:5173") // Adjust port if necessary
+        policy => policy.WithOrigins("http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173") 
                         .AllowAnyMethod()
-                        .AllowAnyHeader());
+                        .AllowAnyHeader()
+                        .SetIsOriginAllowed(origin => true) // allow any origin during development just in case
+                        .AllowCredentials());
 });
 
 var app = builder.Build();
@@ -138,6 +140,16 @@ app.MapPost("/api/shortlist", async (
             // Process PDF File directly (legacy support)
             using var stream = file.OpenReadStream();
             var text = shortlister.ExtractTextFromPdf(stream);
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                resumeData.Add((file.FileName, text));
+            }
+        }
+        else if (extension == ".docx")
+        {
+            // Process DOCX File
+            using var stream = file.OpenReadStream();
+            var text = shortlister.ExtractTextFromDocx(stream);
             if (!string.IsNullOrWhiteSpace(text))
             {
                 resumeData.Add((file.FileName, text));

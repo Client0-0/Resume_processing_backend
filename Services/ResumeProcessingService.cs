@@ -8,6 +8,7 @@ using Shortlister.API.Models;
 using System.Text.Json;
 using System.Text;
 using System.Text.RegularExpressions;
+using DocumentFormat.OpenXml.Packaging;
 
 namespace Shortlister.API.Services;
 
@@ -70,6 +71,21 @@ public class ResumeProcessingService
         catch (Exception ex)
         {
             Console.WriteLine($"Error extracting text: {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    public string ExtractTextFromDocx(Stream docxStream)
+    {
+        try
+        {
+            using WordprocessingDocument wordDocument = WordprocessingDocument.Open(docxStream, false);
+            var body = wordDocument?.MainDocumentPart?.Document?.Body;
+            return body?.InnerText ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error extracting text from docx: {ex.Message}");
             return string.Empty;
         }
     }
