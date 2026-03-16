@@ -19,6 +19,19 @@ public class ResumeProcessingService
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingService;
 #pragma warning restore SKEXP0001
 
+    // Common English stop words excluded from keyword extraction
+    private static readonly HashSet<string> _stopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+        "by", "from", "as", "is", "was", "are", "were", "be", "been", "being", "have", "has",
+        "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "must",
+        "can", "that", "this", "these", "those", "it", "its", "we", "you", "he", "she", "they",
+        "i", "my", "your", "our", "their", "his", "her", "not", "no", "nor", "so", "yet",
+        "both", "either", "neither", "each", "few", "more", "most", "other", "some", "such",
+        "than", "then", "into", "through", "during", "before", "after", "above", "below",
+        "between", "out", "off", "over", "under", "again", "further", "once", "about", "also"
+    };
+
     public ResumeProcessingService(IConfiguration configuration)
     {
         var settings = configuration.GetSection("LLMSettings");
@@ -96,6 +109,9 @@ public class ResumeProcessingService
         var jdEmbeddingResult = await _embeddingService.GenerateAsync(new[] { jd });
         var jdVector = jdEmbeddingResult[0].Vector;
 
+        // 1b. Extract JD keywords for hybrid Layer 1 search (keyword arm)
+        var jdKeywords = ExtractJdKeywords(jd);
+
         var results = new List<CandidateResult>();
 
         // STEP 1: Filter Resumes using "Vector Search" (Cosine Similarity)
@@ -122,53 +138,73 @@ public class ResumeProcessingService
                 }
             }
             
+            // Hybrid Layer 1 score: 60% semantic + 40% keyword
+            // - Semantic catches conceptual alignment even when terminology differs
+            // - Keyword anchors domain-specific skills/tech that embeddings may dilute
+            var keywordScore = CalculateKeywordScore(text, jdKeywords);
+            var hybridScore = (0.6 * maxSimilarity) + (0.4 * keywordScore);
             var distance = 1.0 - maxSimilarity;
-            
-            Console.WriteLine($"[DEBUG] File: {filename} | Max Similarity: {maxSimilarity:F4} | Distance: {distance:F4} | Threshold: > 0.25");
 
-            // Filter Logic: 
-            if (maxSimilarity > 0.25)
+            Console.WriteLine($"[DEBUG] File: {filename} | Semantic: {maxSimilarity:F4} | Keyword: {keywordScore:F4} | Hybrid: {hybridScore:F4} | Threshold: > 0.25");
+
+            // Hybrid Filter Logic
+            if (hybridScore > 0.25)
             {
-                Console.WriteLine($"[DEBUG] -> PASSED Filter 1");
-                qualifiedResumes.Add((filename, text, maxSimilarity));
+                Console.WriteLine($"[DEBUG] -> PASSED Filter 1 (Hybrid)");
+                qualifiedResumes.Add((filename, text, hybridScore));
             }
             else
             {
-                Console.WriteLine($"[DEBUG] -> REJECTED by Filter 1 (Low Similarity)");
-                 results.Add(new CandidateResult { 
-                     Filename = filename, 
-                     Decision = "No", 
-                     BriefReasoning = $"Filtered out by initial component match. Max Similarity: {maxSimilarity:F2} (Low relevance).",
-                     MatchScore = (int)(maxSimilarity * 100),
-                     Distance = distance 
-                 });
+                Console.WriteLine($"[DEBUG] -> REJECTED by Filter 1 (Low Hybrid Score)");
+                results.Add(new CandidateResult {
+                    Filename = filename,
+                    Decision = "No",
+                    BriefReasoning = $"Filtered out by hybrid search. Semantic: {maxSimilarity:F2}, Keyword: {keywordScore:F2}, Hybrid: {hybridScore:F2} (Low relevance).",
+                    MatchScore = (int)(hybridScore * 100),
+                    Distance = distance
+                });
             }
         }
 
         // STEP 2: LLM Analysis for qualified candidates
+        // System prompt defined once (outside the loop) — used for every candidate
+        // Separating persona/instructions into a system message gives GPT models
+        // a privileged, role-level context that the user message cannot override,
+        // leading to more consistent JSON-only output.
+        const string systemPrompt = """
+            You are a senior technical recruiter with 15 years of experience evaluating candidates.
+            Your task is to assess how well a candidate's resume matches a given job description.
+
+            You MUST respond with ONLY a valid JSON object using these exact keys:
+            {
+                "YearsOfExperience": "string or number",
+                "MissingSkills": ["skill1", "skill2"],
+                "MatchScore": number (0-100),
+                "Decision": "Yes" or "No" or "Maybe",
+                "BriefReasoning": "Concise justification for the decision."
+            }
+
+            Rules:
+            - Output ONLY the JSON object. No markdown, no explanation, no preamble.
+            - Decision must be: "Yes" (strong match), "No" (poor match), or "Maybe" (borderline).
+            - MatchScore must reflect genuine skills overlap, not just keyword presence.
+            """;
+
         foreach (var candidate in qualifiedResumes)
         {
-            var prompt = $$"""
+            var userMessage = $"""
                 Job Description:
-                {{jd}}
-                
+                {jd}
+
                 Resume Text:
-                {{candidate.text}}
-                
-                You are a senior technical recruiter. Evaluate the candidate against the Job Description.
-                
-                You MUST output a valid JSON object with these exact keys:
-                {
-                    "YearsOfExperience": "string or number",
-                    "MissingSkills": ["skill1", "skill2", "skill3"],
-                    "MatchScore": number (0-100),
-                    "Decision": "Yes" or "No" or "Maybe",
-                    "BriefReasoning": "Concise justification for the decision."
-                }
-                
-                Do not include any other text, markdown formatting, or explanations outside the JSON.
-                JSON:
+                {candidate.text}
+
+                Evaluate this candidate against the job description and return the JSON.
                 """;
+
+            var chatHistory = new ChatHistory();
+            chatHistory.AddSystemMessage(systemPrompt);
+            chatHistory.AddUserMessage(userMessage);
 
             try 
             {
@@ -179,17 +215,17 @@ public class ResumeProcessingService
                 {
                     var openAIService = _kernel.GetRequiredService<IChatCompletionService>("OpenAI");
                     Console.WriteLine($"[AI] Analyzing {candidate.filename} with OpenAI...");
-                    var response = await openAIService.GetChatMessageContentAsync(prompt);
+                    var response = await openAIService.GetChatMessageContentAsync(chatHistory);
                     jsonContent = response.ToString();
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[Warning] OpenAI failed: {ex.Message}. Falling back to Ollama...");
-                    
+
                     // Fallback (Ollama)
                     var ollamaService = _kernel.GetRequiredService<IChatCompletionService>("Ollama");
                     Console.WriteLine($"[AI] Analyzing {candidate.filename} with Local Llama...");
-                    var response = await ollamaService.GetChatMessageContentAsync(prompt);
+                    var response = await ollamaService.GetChatMessageContentAsync(chatHistory);
                     jsonContent = response.ToString();
                 }
                 
@@ -312,6 +348,34 @@ public class ResumeProcessingService
         }
         return list;
     }
+
+    // ── Hybrid Layer 1 Helpers ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Extracts meaningful tokens from the JD for keyword matching.
+    /// Keeps alphanumeric tokens + common tech symbols (+, #, .) longer than 3 chars.
+    /// </summary>
+    private HashSet<string> ExtractJdKeywords(string jd)
+    {
+        return Regex.Split(jd, @"[^a-zA-Z0-9\+\#\.]+")
+                    .Where(w => w.Length > 3 && !_stopWords.Contains(w))
+                    .Select(w => w.ToLowerInvariant())
+                    .ToHashSet();
+    }
+
+    /// <summary>
+    /// Calculates what fraction of JD keywords appear in the resume text.
+    /// Returns a score in [0, 1].
+    /// </summary>
+    private double CalculateKeywordScore(string resumeText, HashSet<string> jdKeywords)
+    {
+        if (jdKeywords.Count == 0) return 0;
+        var resumeLower = resumeText.ToLowerInvariant();
+        int matches = jdKeywords.Count(kw => resumeLower.Contains(kw));
+        return (double)matches / jdKeywords.Count;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     private List<string> ChunkText(string text, int wordsPerChunk)
     {
