@@ -6,6 +6,7 @@ using Azure.Storage.Blobs;
 
 // Register Encoding for ExcelDataReader
 System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+LoadDotEnvIfPresent();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,8 +18,19 @@ builder.Services.AddScoped<ResumeProcessingService>();
 
 // Register Azure Blob Service Client
 // Register Azure Blob Service Client
-string connectionString = builder.Configuration["AzureStorage:ConnectionString"];
-builder.Services.AddSingleton(x => new BlobServiceClient(connectionString));
+builder.Services.AddSingleton(x =>
+{
+    var configuration = x.GetRequiredService<IConfiguration>();
+    var connectionString = configuration["AzureStorage:ConnectionString"]
+                           ?? Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION_STRING");
+
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new InvalidOperationException("Azure Storage connection string is missing. Set AzureStorage__ConnectionString in .env.");
+    }
+
+    return new BlobServiceClient(connectionString);
+});
 
 // Enable CORS for React frontend
 builder.Services.AddCors(options =>
@@ -199,3 +211,35 @@ app.MapPost("/api/upload-report", async (
 .DisableAntiforgery();
 
 app.Run();
+
+static void LoadDotEnvIfPresent()
+{
+    var envPath = Path.Combine(Directory.GetCurrentDirectory(), ".env");
+    if (!File.Exists(envPath)) return;
+
+    foreach (var rawLine in File.ReadAllLines(envPath))
+    {
+        var line = rawLine.Trim();
+        if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#")) continue;
+
+        var separatorIndex = line.IndexOf('=');
+        if (separatorIndex <= 0) continue;
+
+        var key = line[..separatorIndex].Trim();
+        var value = line[(separatorIndex + 1)..].Trim();
+
+        // Strip optional surrounding quotes from .env values.
+        if ((value.StartsWith('"') && value.EndsWith('"')) || (value.StartsWith('\'') && value.EndsWith('\'')))
+        {
+            value = value[1..^1];
+        }
+
+        if (string.IsNullOrWhiteSpace(key)) continue;
+
+        // Keep externally provided environment values as higher priority.
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))
+        {
+            Environment.SetEnvironmentVariable(key, value);
+        }
+    }
+}

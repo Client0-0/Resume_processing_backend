@@ -14,8 +14,6 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.2.0" />
     <PackageReference Include="Microsoft.SemanticKernel" Version="1.72.0" />
-    <PackageReference Include="Microsoft.SemanticKernel.Connectors.Google" Version="1.72.0-alpha" />
-    <PackageReference Include="Microsoft.SemanticKernel.Connectors.Ollama" Version="1.72.0-alpha" />
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.OpenAI" Version="1.72.0" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.2" NoWarn="NU1510" />
     <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />

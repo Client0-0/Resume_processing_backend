@@ -1,4 +1,6 @@
 appsettings.json
+.env
+.env.*
 [Bb]in/
 [Oo]bj/
 .vs/

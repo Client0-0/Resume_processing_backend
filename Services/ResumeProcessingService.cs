@@ -1,6 +1,5 @@
 using Microsoft.SemanticKernel;
 using Microsoft.Extensions.AI;
-using Microsoft.SemanticKernel.Connectors.Ollama;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 using Microsoft.SemanticKernel.ChatCompletion;
 using UglyToad.PdfPig;
@@ -18,6 +17,8 @@ public class ResumeProcessingService
 #pragma warning disable SKEXP0001
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingService;
 #pragma warning restore SKEXP0001
+    private readonly int _chunkWords;
+    private readonly int _chunkOverlapWords;
 
     // Common English stop words excluded from keyword extraction
     private static readonly HashSet<string> _stopWords = new(StringComparer.OrdinalIgnoreCase)
@@ -35,34 +36,44 @@ public class ResumeProcessingService
     public ResumeProcessingService(IConfiguration configuration)
     {
         var settings = configuration.GetSection("LLMSettings");
-        var openAIKey = settings["OpenAIApiKey"];
-        var openAIModel = settings["OpenAIModelId"] ?? "gpt-4o";
-        
-        var localModel = settings["LocalModelId"] ?? "llama3.2";
-        var localEndpoint = settings["LocalEndpoint"] ?? "http://localhost:11434";
-        var embeddingModelId = settings["EmbeddingModelId"] ?? "mahonzhan/all-MiniLM-L6-v2";
+        var openAIKey =
+            settings["OpenAIApiKey"]
+            ?? Environment.GetEnvironmentVariable("LLMSettings__OpenAIApiKey")
+            ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+
+        var openAIModel =
+            settings["OpenAIModelId"]
+            ?? Environment.GetEnvironmentVariable("LLMSettings__OpenAIModelId")
+            ?? "gpt-4o-mini";
+
+        var openAIEmbeddingModel =
+            settings["OpenAIEmbeddingModelId"]
+            ?? Environment.GetEnvironmentVariable("LLMSettings__OpenAIEmbeddingModelId")
+            ?? "text-embedding-3-small";
+
+        var processingSettings = configuration.GetSection("ShortlisterProcessing");
+        _chunkWords = processingSettings.GetValue<int?>("ChunkWords") ?? 200;
+        _chunkOverlapWords = processingSettings.GetValue<int?>("ChunkOverlapWords") ?? 50;
 
         var builder = Kernel.CreateBuilder();
 
-        // Register OpenAI (Primary)
-        if (!string.IsNullOrWhiteSpace(openAIKey))
+        if (string.IsNullOrWhiteSpace(openAIKey))
         {
-            builder.AddOpenAIChatCompletion(
-                modelId: openAIModel,
-                apiKey: openAIKey,
-                serviceId: "OpenAI");
+            throw new InvalidOperationException("OpenAI API key is missing. Set LLMSettings__OpenAIApiKey (or OPENAI_API_KEY) in .env.");
         }
 
-        // Register Ollama (Fallback)
-        builder.AddOllamaChatCompletion(
-            modelId: localModel,
-            endpoint: new Uri(localEndpoint),
-            serviceId: "Ollama");
+        // Register OpenAI chat
+        builder.AddOpenAIChatCompletion(
+            modelId: openAIModel,
+            apiKey: openAIKey,
+            serviceId: "OpenAI");
 
-        // Register Embeddings (Local)
-#pragma warning disable CS0618
-        builder.AddOllamaEmbeddingGenerator(embeddingModelId, new Uri(localEndpoint));
-#pragma warning restore CS0618
+        // Register OpenAI embeddings
+#pragma warning disable SKEXP0010
+        builder.AddOpenAIEmbeddingGenerator(
+            modelId: openAIEmbeddingModel,
+            apiKey: openAIKey);
+#pragma warning restore SKEXP0010
 
         _kernel = builder.Build();
         
@@ -106,7 +117,8 @@ public class ResumeProcessingService
     public async Task<List<CandidateResult>> ProcessResumesAsync(List<(string filename, string text)> resumes, string jd)
     {
         // 1. Get JD Embedding
-        var jdEmbeddingResult = await _embeddingService.GenerateAsync(new[] { jd });
+        var truncatedJd = TruncateToWordLimit(jd, 150); // ~512 tokens safe limit
+        var jdEmbeddingResult = await _embeddingService.GenerateAsync(new[] { truncatedJd });
         var jdVector = jdEmbeddingResult[0].Vector;
 
         // 1b. Extract JD keywords for hybrid Layer 1 search (keyword arm)
@@ -123,7 +135,7 @@ public class ResumeProcessingService
 
             // Semantic Chunking: Split resume into chunks (200 words)
             // Increased from 100 to 200 to capture slightly more context per segment while staying within 512 token limit.
-            var chunks = ChunkText(text, 200); 
+            var chunks = ChunkText(text, _chunkWords, _chunkOverlapWords);
             double maxSimilarity = 0;
             
             foreach (var chunk in chunks)
@@ -206,28 +218,12 @@ public class ResumeProcessingService
             chatHistory.AddSystemMessage(systemPrompt);
             chatHistory.AddUserMessage(userMessage);
 
-            try 
+            try
             {
-                string jsonContent = string.Empty;
-
-                // Try Primary (OpenAI)
-                try
-                {
-                    var openAIService = _kernel.GetRequiredService<IChatCompletionService>("OpenAI");
-                    Console.WriteLine($"[AI] Analyzing {candidate.filename} with OpenAI...");
-                    var response = await openAIService.GetChatMessageContentAsync(chatHistory);
-                    jsonContent = response.ToString();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[Warning] OpenAI failed: {ex.Message}. Falling back to Ollama...");
-
-                    // Fallback (Ollama)
-                    var ollamaService = _kernel.GetRequiredService<IChatCompletionService>("Ollama");
-                    Console.WriteLine($"[AI] Analyzing {candidate.filename} with Local Llama...");
-                    var response = await ollamaService.GetChatMessageContentAsync(chatHistory);
-                    jsonContent = response.ToString();
-                }
+                var openAIService = _kernel.GetRequiredService<IChatCompletionService>("OpenAI");
+                Console.WriteLine($"[AI] Analyzing {candidate.filename} with OpenAI...");
+                var response = await openAIService.GetChatMessageContentAsync(chatHistory);
+                string jsonContent = response.ToString();
                 
                 // Robust JSON Extraction & Repair
                 jsonContent = ExtractJson(jsonContent);
@@ -377,15 +373,28 @@ public class ResumeProcessingService
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    private List<string> ChunkText(string text, int wordsPerChunk)
+    private List<string> ChunkText(string text, int wordsPerChunk, int overlapWords)
     {
         var words = text.Split(new[] { ' ', '\r', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries);
         var chunks = new List<string>();
-        
-        for (int i = 0; i < words.Length; i += wordsPerChunk)
+
+        if (wordsPerChunk <= 0)
+        {
+            wordsPerChunk = 200;
+        }
+
+        // Force valid overlap so sliding-window progress is guaranteed.
+        overlapWords = Math.Max(0, Math.Min(overlapWords, wordsPerChunk - 1));
+        var step = wordsPerChunk - overlapWords;
+
+        for (int i = 0; i < words.Length; i += step)
         {
             var chunkWords = words.Skip(i).Take(wordsPerChunk);
-            chunks.Add(string.Join(" ", chunkWords));
+            var chunk = string.Join(" ", chunkWords);
+            if (!string.IsNullOrWhiteSpace(chunk))
+            {
+                chunks.Add(chunk);
+            }
         }
         
         if (chunks.Count == 0 && !string.IsNullOrWhiteSpace(text))
@@ -411,5 +420,13 @@ public class ResumeProcessingService
          if (norm1 == 0 || norm2 == 0) return 0;
 
         return dotProduct / (Math.Sqrt(norm1) * Math.Sqrt(norm2));
+    }
+    private string TruncateToWordLimit(string text, int maxWords = 200)
+    {
+    var words = text.Split(new[] { ' ', '\r', '\n', '\t' }, 
+                    StringSplitOptions.RemoveEmptyEntries);
+    return words.Length <= maxWords 
+        ? text 
+        : string.Join(" ", words.Take(maxWords));
     }
 }
