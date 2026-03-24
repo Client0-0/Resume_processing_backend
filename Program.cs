@@ -55,7 +55,8 @@ app.UseCors("AllowReactApp");
 
 app.MapPost("/api/shortlist", async (
     [FromForm] IFormFileCollection resumes,
-    [FromForm] string jd,
+    [FromForm] string? jd,
+    [FromForm] IFormFile? jdFile,
     [FromServices] ResumeProcessingService shortlister,
     [FromServices] GoogleDriveService driveService) =>
 {
@@ -64,9 +65,39 @@ app.MapPost("/api/shortlist", async (
         return Results.BadRequest("No files uploaded.");
     }
 
-    if (string.IsNullOrWhiteSpace(jd))
+    string finalJd = jd ?? string.Empty;
+
+    // Optional JD file input. If provided, it takes precedence over text.
+    if (jdFile is not null && jdFile.Length > 0)
     {
-        return Results.BadRequest("Job description is required.");
+        try
+        {
+            using var jdStream = jdFile.OpenReadStream();
+            var jdExtension = Path.GetExtension(jdFile.FileName).ToLowerInvariant();
+
+            finalJd = jdExtension switch
+            {
+                ".txt" => await new StreamReader(jdStream).ReadToEndAsync(),
+                ".pdf" => shortlister.ExtractTextFromPdf(jdStream),
+                ".docx" => shortlister.ExtractTextFromDocx(jdStream),
+                _ => string.Empty
+            };
+
+            if (string.IsNullOrWhiteSpace(finalJd))
+            {
+                return Results.BadRequest("Could not extract text from JD file. Supported formats: .txt, .pdf, .docx");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Error] Processing JD file: {ex.Message}");
+            return Results.BadRequest($"Error processing JD file: {ex.Message}");
+        }
+    }
+
+    if (string.IsNullOrWhiteSpace(finalJd))
+    {
+        return Results.BadRequest("Job description is required (paste text in jd or upload jdFile).");
     }
 
     var resumeData = new List<(string filename, string text)>();
@@ -174,7 +205,7 @@ app.MapPost("/api/shortlist", async (
         return Results.BadRequest("Could not extract text from any resumes/links.");
     }
 
-    var results = await shortlister.ProcessResumesAsync(resumeData, jd);
+    var results = await shortlister.ProcessResumesAsync(resumeData, finalJd);
     return Results.Ok(results);
 })
 .DisableAntiforgery();
