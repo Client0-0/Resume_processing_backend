@@ -1,0 +1,31 @@
+job_id,role,location,experience_required,jd_pdf
+JD0001,Mobile App Developer,Kochi,5+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0001_mobile_app_developer.pdf
+JD0002,Mobile App Developer,Kochi,4+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0002_mobile_app_developer.pdf
+JD0003,Security Engineer,Pune,7+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0003_security_engineer.pdf
+JD0004,QA Automation Engineer,Bengaluru,3+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0004_qa_automation_engineer.pdf
+JD0005,Mobile App Developer,Ahmedabad,3+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0005_mobile_app_developer.pdf
+JD0006,Frontend Developer,Pune,7+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0006_frontend_developer.pdf
+JD0007,Product Analyst,Pune,8+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0007_product_analyst.pdf
+JD0008,Frontend Developer,Chennai,6+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0008_frontend_developer.pdf
+JD0009,Cloud Engineer,Kochi,6+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0009_cloud_engineer.pdf
+JD0010,Backend Developer,Kolkata,6+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0010_backend_developer.pdf
+JD0011,Frontend Developer,Mumbai,2+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0011_frontend_developer.pdf
+JD0012,Data Engineer,Kolkata,10+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0012_data_engineer.pdf
+JD0013,BI Developer,Mumbai,9+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0013_bi_developer.pdf
+JD0014,Product Analyst,Bengaluru,4+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0014_product_analyst.pdf
+JD0015,Data Engineer,Kolkata,3+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0015_data_engineer.pdf
+JD0016,BI Developer,Pune,4+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0016_bi_developer.pdf
+JD0017,Cloud Engineer,Ahmedabad,8+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0017_cloud_engineer.pdf
+JD0018,Data Analyst,Chennai,7+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0018_data_analyst.pdf
+JD0019,NLP Engineer,Hyderabad,9+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0019_nlp_engineer.pdf
+JD0020,Mobile App Developer,Ahmedabad,5+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0020_mobile_app_developer.pdf
+JD0021,Mobile App Developer,Mumbai,3+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0021_mobile_app_developer.pdf
+JD0022,Full Stack Engineer,Delhi,2+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0022_full_stack_engineer.pdf
+JD0023,BI Developer,Kochi,9+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0023_bi_developer.pdf
+JD0024,Cloud Engineer,Bengaluru,8+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0024_cloud_engineer.pdf
+JD0025,BI Developer,Bengaluru,10+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0025_bi_developer.pdf
+JD0026,Security Engineer,Kolkata,6+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0026_security_engineer.pdf
+JD0027,QA Automation Engineer,Noida,2+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0027_qa_automation_engineer.pdf
+JD0028,Data Analyst,Mumbai,6+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0028_data_analyst.pdf
+JD0029,Product Analyst,Ahmedabad,2+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0029_product_analyst.pdf
+JD0030,DevOps Engineer,Ahmedabad,10+ years,output/pdf/synthetic_screening_dataset/jds/jd_JD0030_devops_engineer.pdf

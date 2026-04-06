@@ -19,6 +19,12 @@ public class ResumeProcessingService
 #pragma warning restore SKEXP0001
     private readonly int _chunkWords;
     private readonly int _chunkOverlapWords;
+    private readonly double _hybridSemanticWeight;
+    private readonly double _hybridKeywordWeight;
+    private readonly double _hybridPassFloor;
+    private readonly double _layer1DynamicPercentile;
+    private readonly double _mustHaveCoverageThreshold;
+    private readonly int _mustHaveMinKeywordCountForGate;
 
     // Common English stop words excluded from keyword extraction
     private static readonly HashSet<string> _stopWords = new(StringComparer.OrdinalIgnoreCase)
@@ -31,6 +37,17 @@ public class ResumeProcessingService
         "both", "either", "neither", "each", "few", "more", "most", "other", "some", "such",
         "than", "then", "into", "through", "during", "before", "after", "above", "below",
         "between", "out", "off", "over", "under", "again", "further", "once", "about", "also"
+    };
+
+    // Generic words that should not drive must-have gating.
+    private static readonly HashSet<string> _genericMustHaveWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "experience", "years", "year", "skill", "skills", "knowledge", "ability", "strong",
+        "excellent", "good", "understanding", "work", "working", "team", "teams", "candidate",
+        "responsible", "responsibilities", "role", "position", "using", "development", "develop",
+        "design", "build", "building", "implement", "implementation", "maintain", "support",
+        "communication", "problem", "solving", "analytical", "preferred", "must", "required",
+        "mandatory", "nice", "have"
     };
 
     public ResumeProcessingService(IConfiguration configuration)
@@ -54,6 +71,12 @@ public class ResumeProcessingService
         var processingSettings = configuration.GetSection("ShortlisterProcessing");
         _chunkWords = processingSettings.GetValue<int?>("ChunkWords") ?? 200;
         _chunkOverlapWords = processingSettings.GetValue<int?>("ChunkOverlapWords") ?? 50;
+        _hybridSemanticWeight = processingSettings.GetValue<double?>("HybridSemanticWeight") ?? 0.6;
+        _hybridKeywordWeight = processingSettings.GetValue<double?>("HybridKeywordWeight") ?? 0.4;
+        _hybridPassFloor = processingSettings.GetValue<double?>("HybridPassThreshold") ?? 0.25;
+        _layer1DynamicPercentile = processingSettings.GetValue<double?>("Layer1DynamicPercentile") ?? 0.7;
+        _mustHaveCoverageThreshold = processingSettings.GetValue<double?>("Layer1MustHaveCoverageThreshold") ?? 0.35;
+        _mustHaveMinKeywordCountForGate = processingSettings.GetValue<int?>("Layer1MustHaveMinKeywordCount") ?? 3;
 
         var builder = Kernel.CreateBuilder();
 
@@ -123,10 +146,12 @@ public class ResumeProcessingService
 
         // 1b. Extract JD keywords for hybrid Layer 1 search (keyword arm)
         var jdKeywords = ExtractJdKeywords(jd);
+        var mustHaveKeywords = ExtractMustHaveKeywords(jd);
 
         var results = new List<CandidateResult>();
 
         // STEP 1: Filter Resumes using "Vector Search" (Cosine Similarity)
+        var layer1Candidates = new List<(string filename, string text, double semanticScore, double keywordScore, double hybridScore, double mustHaveCoverage)>();
         var qualifiedResumes = new List<(string filename, string text, double similarity)>();
 
         foreach (var (filename, text) in resumes)
@@ -154,28 +179,58 @@ public class ResumeProcessingService
             // - Semantic catches conceptual alignment even when terminology differs
             // - Keyword anchors domain-specific skills/tech that embeddings may dilute
             var keywordScore = CalculateKeywordScore(text, jdKeywords);
-            var hybridScore = (0.6 * maxSimilarity) + (0.4 * keywordScore);
-            var distance = 1.0 - maxSimilarity;
+            var hybridScore = (_hybridSemanticWeight * maxSimilarity) + (_hybridKeywordWeight * keywordScore);
+            var mustHaveCoverage = CalculateKeywordScore(text, mustHaveKeywords);
+            layer1Candidates.Add((filename, text, maxSimilarity, keywordScore, hybridScore, mustHaveCoverage));
+        }
 
-            Console.WriteLine($"[DEBUG] File: {filename} | Semantic: {maxSimilarity:F4} | Keyword: {keywordScore:F4} | Hybrid: {hybridScore:F4} | Threshold: > 0.25");
+        // Dynamic Layer 1 threshold per JD + resume pool.
+        var dynamicThreshold = Math.Max(
+            _hybridPassFloor,
+            CalculatePercentile(layer1Candidates.Select(c => c.hybridScore).ToList(), _layer1DynamicPercentile)
+        );
+        var applyMustHaveGate = mustHaveKeywords.Count >= _mustHaveMinKeywordCountForGate;
 
-            // Hybrid Filter Logic
-            if (hybridScore > 0.25)
+        Console.WriteLine(
+            $"[L1] Candidates: {layer1Candidates.Count} | BaseFloor: {_hybridPassFloor:F2} | " +
+            $"DynamicPercentile: {_layer1DynamicPercentile:F2} | DynamicThreshold: {dynamicThreshold:F4} | " +
+            $"MustHaveKeywords: {mustHaveKeywords.Count} | MustHaveGate: {(applyMustHaveGate ? $"ON >= {_mustHaveCoverageThreshold:F2}" : "OFF")}"
+        );
+
+        foreach (var candidate in layer1Candidates)
+        {
+            var distance = 1.0 - candidate.semanticScore;
+            var failedMustHave = applyMustHaveGate && candidate.mustHaveCoverage < _mustHaveCoverageThreshold;
+            var passedThreshold = candidate.hybridScore >= dynamicThreshold;
+
+            Console.WriteLine(
+                $"[DEBUG] File: {candidate.filename} | Semantic: {candidate.semanticScore:F4} | " +
+                $"Keyword: {candidate.keywordScore:F4} | Hybrid: {candidate.hybridScore:F4} | " +
+                $"MustHave: {candidate.mustHaveCoverage:F4} | Threshold: >= {dynamicThreshold:F4}"
+            );
+
+            if (!failedMustHave && passedThreshold)
             {
-                Console.WriteLine($"[DEBUG] -> PASSED Filter 1 (Hybrid)");
-                qualifiedResumes.Add((filename, text, hybridScore));
+                Console.WriteLine("[DEBUG] -> PASSED Filter 1 (Dynamic + JD-aware)");
+                qualifiedResumes.Add((candidate.filename, candidate.text, candidate.hybridScore));
+                continue;
             }
-            else
+
+            var reason = failedMustHave
+                ? $"Failed JD must-have gate. Must-have coverage: {candidate.mustHaveCoverage:F2} < {_mustHaveCoverageThreshold:F2}."
+                : $"Below dynamic hybrid threshold. Hybrid: {candidate.hybridScore:F2} < {dynamicThreshold:F2}.";
+
+            Console.WriteLine($"[DEBUG] -> REJECTED by Filter 1 ({reason})");
+            results.Add(new CandidateResult
             {
-                Console.WriteLine($"[DEBUG] -> REJECTED by Filter 1 (Low Hybrid Score)");
-                results.Add(new CandidateResult {
-                    Filename = filename,
-                    Decision = "No",
-                    BriefReasoning = $"Filtered out by hybrid search. Semantic: {maxSimilarity:F2}, Keyword: {keywordScore:F2}, Hybrid: {hybridScore:F2} (Low relevance).",
-                    MatchScore = (int)(hybridScore * 100),
-                    Distance = distance
-                });
-            }
+                Filename = candidate.filename,
+                Decision = "No",
+                BriefReasoning =
+                    $"Filtered out by Layer 1. Semantic: {candidate.semanticScore:F2}, Keyword: {candidate.keywordScore:F2}, " +
+                    $"Hybrid: {candidate.hybridScore:F2}, Must-have: {candidate.mustHaveCoverage:F2}. {reason}",
+                MatchScore = (int)(candidate.hybridScore * 100),
+                Distance = distance
+            });
         }
 
         // STEP 2: LLM Analysis for qualified candidates
@@ -360,6 +415,84 @@ public class ResumeProcessingService
     }
 
     /// <summary>
+    /// Extracts stricter JD "must-have" keywords from common requirement sections.
+    /// Falls back to explicit inline "must/required/mandatory" lines only.
+    /// </summary>
+    private HashSet<string> ExtractMustHaveKeywords(string jd)
+    {
+        if (string.IsNullOrWhiteSpace(jd))
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var mustLines = new List<string>();
+        var lines = jd.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        var inMustSection = false;
+
+        foreach (var raw in lines)
+        {
+            var line = raw.Trim();
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            var lower = line.ToLowerInvariant();
+
+            var startsMustSection = Regex.IsMatch(
+                lower,
+                @"^(must[-\s]?have|required skills?|requirements?|mandatory skills?|essential skills?)\b"
+            );
+
+            var startsNewSection = Regex.IsMatch(
+                lower,
+                @"^(nice[-\s]?to[-\s]?have|preferred|good[-\s]?to[-\s]?have|responsibilit|about|overview|benefits|compensation|location|salary|notice period)\b"
+            );
+
+            if (startsMustSection)
+            {
+                inMustSection = true;
+                var afterColon = line.Contains(':') ? line[(line.IndexOf(':') + 1)..].Trim() : string.Empty;
+                if (!string.IsNullOrWhiteSpace(afterColon))
+                {
+                    mustLines.Add(afterColon);
+                }
+                continue;
+            }
+
+            // Inline must/required/mandatory signals
+            if (Regex.IsMatch(lower, @"\b(must|required|mandatory)\b"))
+            {
+                mustLines.Add(line);
+                continue;
+            }
+
+            if (inMustSection)
+            {
+                if (startsNewSection)
+                {
+                    inMustSection = false;
+                    continue;
+                }
+
+                // Keep likely requirement bullets/lines until section changes.
+                if (line.StartsWith("-") || line.StartsWith("*") || Regex.IsMatch(line, @"^\d+[\.\)]"))
+                {
+                    mustLines.Add(line);
+                }
+            }
+        }
+
+        var extracted = Regex.Split(string.Join(" ", mustLines), @"[^a-zA-Z0-9\+\#\.]+")
+                             .Where(w => w.Length > 2)
+                             .Select(w => w.ToLowerInvariant())
+                             .Where(w => !_stopWords.Contains(w) && !_genericMustHaveWords.Contains(w))
+                             .ToHashSet();
+
+        return extracted;
+    }
+
+    /// <summary>
     /// Calculates what fraction of JD keywords appear in the resume text.
     /// Returns a score in [0, 1].
     /// </summary>
@@ -369,6 +502,34 @@ public class ResumeProcessingService
         var resumeLower = resumeText.ToLowerInvariant();
         int matches = jdKeywords.Count(kw => resumeLower.Contains(kw));
         return (double)matches / jdKeywords.Count;
+    }
+
+    private static double CalculatePercentile(List<double> values, double percentile)
+    {
+        if (values.Count == 0)
+        {
+            return 0;
+        }
+
+        percentile = Math.Clamp(percentile, 0, 1);
+        values.Sort();
+
+        if (values.Count == 1)
+        {
+            return values[0];
+        }
+
+        var rank = percentile * (values.Count - 1);
+        var lower = (int)Math.Floor(rank);
+        var upper = (int)Math.Ceiling(rank);
+
+        if (lower == upper)
+        {
+            return values[lower];
+        }
+
+        var weight = rank - lower;
+        return values[lower] + ((values[upper] - values[lower]) * weight);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

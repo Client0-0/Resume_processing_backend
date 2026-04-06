@@ -13,23 +13,23 @@ var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.
 builder.Services.AddOpenApi();
 builder.Services.AddHttpClient();
+builder.Services.AddControllers();
 builder.Services.AddScoped<GoogleDriveService>();
 builder.Services.AddScoped<ResumeProcessingService>();
 
-// Register Azure Blob Service Client
-// Register Azure Blob Service Client
+// Register Azure Blob Service Client (optional for shortlist flow).
 builder.Services.AddSingleton(x =>
 {
     var configuration = x.GetRequiredService<IConfiguration>();
     var connectionString = configuration["AzureStorage:ConnectionString"]
                            ?? Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION_STRING");
 
-    if (string.IsNullOrWhiteSpace(connectionString))
+    return new AzureBlobClientAccessor
     {
-        throw new InvalidOperationException("Azure Storage connection string is missing. Set AzureStorage__ConnectionString in .env.");
-    }
-
-    return new BlobServiceClient(connectionString);
+        Client = string.IsNullOrWhiteSpace(connectionString)
+            ? null
+            : new BlobServiceClient(connectionString)
+    };
 });
 
 // Enable CORS for React frontend
@@ -205,18 +205,43 @@ app.MapPost("/api/shortlist", async (
         return Results.BadRequest("Could not extract text from any resumes/links.");
     }
 
-    var results = await shortlister.ProcessResumesAsync(resumeData, finalJd);
-    return Results.Ok(results);
+    try
+    {
+        var results = await shortlister.ProcessResumesAsync(resumeData, finalJd);
+        return Results.Ok(results);
+    }
+    catch (HttpRequestException ex)
+    {
+        Console.WriteLine($"[Error] OpenAI connectivity issue: {ex.Message}");
+        return Results.Problem(
+            title: "OpenAI connectivity error",
+            detail: "Unable to reach api.openai.com. Check internet/DNS/proxy settings and try again.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Error] Shortlisting failed: {ex.Message}");
+        return Results.Problem(
+            title: "Shortlisting failed",
+            detail: ex.Message,
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
 })
 .DisableAntiforgery();
 
 app.MapPost("/api/upload-report", async (
     [FromForm] IFormFile file,
-    [FromServices] BlobServiceClient blobServiceClient) =>
+    [FromServices] AzureBlobClientAccessor blobAccessor) =>
 {
     if (file == null || file.Length == 0)
     {
         return Results.BadRequest("No file uploaded.");
+    }
+
+    var blobServiceClient = blobAccessor.Client;
+    if (blobServiceClient is null)
+    {
+        return Results.BadRequest("Azure storage is not configured. Set AZURE_STORAGE_CONNECTION_STRING or AzureStorage__ConnectionString.");
     }
 
     try
@@ -240,6 +265,8 @@ app.MapPost("/api/upload-report", async (
     }
 })
 .DisableAntiforgery();
+
+app.MapControllers();
 
 app.Run();
 
